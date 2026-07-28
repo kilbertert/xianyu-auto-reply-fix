@@ -74,6 +74,7 @@ AI 回复使用统一的 `model_name` / `api_key` / `base_url` / `api_type` 配�
 | [使用指南](docs/usage.md) | 用户注册、添加账号、自动回复、自动发货 |
 | [常见问题](docs/faq.md) | 端口、数据库、WebSocket、Playwright、Docker、Windows 问题 |
 | [发版与热更新说明](docs/release.md) | 热更新清单、版本号、`release_precheck.py`、Release 流程 |
+| [Android 消息网关](docs/android-message-gateway.md) | Android 稳定消息源、业务决策、签名、幂等和部署配置 |
 | [安全政策](SECURITY.md) | 安全问题反馈和处理方式 |
 
 ## 🏗️ 技术架构
