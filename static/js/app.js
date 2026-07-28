@@ -14566,7 +14566,7 @@ function resetPasswordLoginForm() {
 let qrCodeCheckInterval = null;
 let qrCodeSessionId = null;
 let qrCodeModalEventsBound = false;
-let qrLoginMode = 'standard'; // 'standard' = 原 Playwright；'lite' = 纯 HTTP (cv-cat 风格)
+let qrLoginMode = 'lite'; // 默认使用会完成 login_token 交换的纯 HTTP 流程
 let qrCodeVerificationState = {
     renderKey: '',
     toastShown: false,
@@ -14646,7 +14646,7 @@ function initializeQRCodeLoginModal() {
 }
 
 // 显示扫码登录模态框
-function showQRCodeLogin(mode = 'standard') {
+function showQRCodeLogin(mode = 'lite') {
     qrLoginMode = mode === 'lite' ? 'lite' : 'standard';
     applyQRLoginModeChrome();
     const modalElement = initializeQRCodeLoginModal();
