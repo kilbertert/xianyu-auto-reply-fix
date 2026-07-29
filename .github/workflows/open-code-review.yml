@@ -111,7 +111,7 @@ jobs:
           llm_auth_token: ${{ secrets.GITHUB_TOKEN }}
           llm_model: openai/gpt-4.1-mini
           llm_use_anthropic: 'false'
-          llm_extra_body: '{}'
+          llm_extra_body: '{"max_completion_tokens":4096}'
           language: 中文
           base_ref: ${{ steps.pr.outputs.base_ref }}
           head_sha: ${{ steps.pr.outputs.head_sha }}
