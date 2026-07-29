@@ -61,8 +61,50 @@ jobs:
             core.setOutput('head_sha', pullRequest.head.sha);
             core.setOutput('title', pullRequest.title);
 
+      - name: Test GitHub Models tool calling
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODEL: openai/gpt-4.1-mini
+        shell: bash
+        run: |
+          payload="$(jq -nc --arg model "$MODEL" '{
+            model: $model,
+            messages: [
+              {role: "user", content: "Call the task_done tool once."}
+            ],
+            tools: [
+              {
+                type: "function",
+                function: {
+                  name: "task_done",
+                  description: "Finish the test",
+                  parameters: {type: "object", properties: {}}
+                }
+              }
+            ],
+            tool_choice: "auto"
+          }')"
+
+          http_code="$(curl -sS \
+            -o /tmp/github-models-test.json \
+            -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            https://models.github.ai/inference/chat/completions \
+            -d "$payload")"
+
+          if [[ "$http_code" != '200' ]]; then
+            echo "GitHub Models preflight failed with HTTP $http_code" >&2
+            jq . /tmp/github-models-test.json >&2 || true
+            exit 1
+          fi
+
+          jq '{model, finish_reason: .choices[0].finish_reason, tool_calls: (.choices[0].message.tool_calls | length)}' \
+            /tmp/github-models-test.json
+
       - name: Run OpenCodeReview
         id: ocr
+        continue-on-error: true
         uses: alibaba/open-code-review@v1.8.0
         with:
           llm_url: https://models.github.ai/inference/chat/completions
@@ -80,10 +122,26 @@ jobs:
           incremental: 'true'
           upload_artifacts: 'true'
 
+      - name: Upload OCR session diagnostics
+        if: always() && steps.ocr.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-session-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ~/.opencodereview/sessions
+          if-no-files-found: warn
+          retention-days: 3
+
       - name: Enforce review gate
-        if: always() && steps.ocr.outcome == 'success'
+        if: always()
         shell: bash
+        env:
+          OCR_OUTCOME: ${{ steps.ocr.outcome }}
         run: |
+          if [[ "$OCR_OUTCOME" != 'success' ]]; then
+            echo "OpenCodeReview action failed: $OCR_OUTCOME" >&2
+            exit 1
+          fi
+
           if [[ ! -s /tmp/ocr-result.json ]]; then
             echo 'OpenCodeReview did not produce a JSON result.' >&2
             exit 1
