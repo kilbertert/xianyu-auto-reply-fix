@@ -102,14 +102,29 @@ jobs:
           jq '{model, finish_reason: .choices[0].finish_reason, tool_calls: (.choices[0].message.tool_calls | length)}' \
             /tmp/github-models-test.json
 
+      - name: Configure OCR endpoint
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm install -g '@alibaba-group/open-code-review@1.8.0' >/dev/null
+          ocr config set llm.url 'https://models.github.ai/inference/chat/completions' >/dev/null
+          ocr config set llm.auth_token "$GITHUB_TOKEN" >/dev/null
+          ocr config set llm.model 'openai/gpt-4.1-mini' >/dev/null
+          ocr config set llm.protocol 'openai' >/dev/null
+          ocr config set llm.extra_body '{"max_completion_tokens":4096}' >/dev/null
+          ocr config set language '中文' >/dev/null
+
       - name: Run OpenCodeReview
         id: ocr
         continue-on-error: true
         uses: alibaba/open-code-review@v1.8.0
         with:
-          llm_url: https://models.github.ai/inference/chat/completions
-          llm_auth_token: ${{ secrets.GITHUB_TOKEN }}
-          llm_model: openai/gpt-4.1-mini
+          # The endpoint is configured above so llm.extra_body is not shadowed
+          # by the action's OCR_LLM_* environment variables.
+          llm_url: ''
+          llm_auth_token: ''
+          llm_model: ''
           llm_use_anthropic: 'false'
           llm_extra_body: '{"max_completion_tokens":4096}'
           language: 中文
