@@ -1,0 +1,104 @@
+name: OpenCodeReview
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  pull-requests: write
+  models: read
+
+concurrency:
+  group: open-code-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (
+        github.event.issue.pull_request &&
+        github.event.comment.user.type != 'Bot' &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+        (
+          startsWith(github.event.comment.body, '/open-code-review') ||
+          startsWith(github.event.comment.body, '@open-code-review')
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Resolve pull request
+        id: pr
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+        with:
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              core.setFailed(`Invalid pull request number: ${process.env.PR_NUMBER}`);
+              return;
+            }
+
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            core.setOutput('base_ref', pullRequest.base.ref);
+            core.setOutput('head_sha', pullRequest.head.sha);
+            core.setOutput('title', pullRequest.title);
+
+      - name: Run OpenCodeReview
+        id: ocr
+        uses: alibaba/open-code-review@v1.8.0
+        with:
+          llm_url: https://models.github.ai/inference/chat/completions
+          llm_auth_token: ${{ secrets.GITHUB_TOKEN }}
+          llm_model: openai/gpt-4.1-mini
+          llm_use_anthropic: 'false'
+          llm_extra_body: '{}'
+          language: 中文
+          base_ref: ${{ steps.pr.outputs.base_ref }}
+          head_sha: ${{ steps.pr.outputs.head_sha }}
+          background: ${{ steps.pr.outputs.title }}
+          ocr_version: 1.8.0
+          review_concurrency: '2'
+          sticky_summary: 'true'
+          incremental: 'true'
+          upload_artifacts: 'true'
+
+      - name: Enforce review gate
+        if: always() && steps.ocr.outcome == 'success'
+        shell: bash
+        run: |
+          if [[ ! -s /tmp/ocr-result.json ]]; then
+            echo 'OpenCodeReview did not produce a JSON result.' >&2
+            exit 1
+          fi
+
+          status="$(jq -r '.status // "unknown"' /tmp/ocr-result.json)"
+          if [[ "$status" == 'completed_with_errors' || "$status" == 'unknown' ]]; then
+            echo "OpenCodeReview completed with an unsafe status: $status" >&2
+            exit 1
+          fi
+
+          blocking_count="$(jq '[.comments[]? | select(.severity == "critical" or .severity == "high")] | length' /tmp/ocr-result.json)"
+          if ((blocking_count > 0)); then
+            echo "OpenCodeReview found $blocking_count critical/high issue(s)." >&2
+            exit 1
+          fi
+
+          echo 'OpenCodeReview gate passed: no critical/high issues.'
