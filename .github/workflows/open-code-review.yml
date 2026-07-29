@@ -5,12 +5,6 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: Pull request number to review
-        required: true
-        type: number
 
 permissions:
   contents: read
@@ -18,7 +12,7 @@ permissions:
   models: read
 
 concurrency:
-  group: open-code-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.run_id }}
+  group: open-code-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -42,7 +36,7 @@ jobs:
         id: pr
         uses: actions/github-script@v7
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         with:
           script: |
             const prNumber = Number(process.env.PR_NUMBER);
@@ -60,47 +54,6 @@ jobs:
             core.setOutput('base_ref', pullRequest.base.ref);
             core.setOutput('head_sha', pullRequest.head.sha);
             core.setOutput('title', pullRequest.title);
-
-      - name: Test GitHub Models tool calling
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MODEL: openai/gpt-4.1-mini
-        shell: bash
-        run: |
-          payload="$(jq -nc --arg model "$MODEL" '{
-            model: $model,
-            messages: [
-              {role: "user", content: "Call the task_done tool once."}
-            ],
-            tools: [
-              {
-                type: "function",
-                function: {
-                  name: "task_done",
-                  description: "Finish the test",
-                  parameters: {type: "object", properties: {}}
-                }
-              }
-            ],
-            tool_choice: "auto"
-          }')"
-
-          http_code="$(curl -sS \
-            -o /tmp/github-models-test.json \
-            -w '%{http_code}' \
-            -H 'Content-Type: application/json' \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            https://models.github.ai/inference/chat/completions \
-            -d "$payload")"
-
-          if [[ "$http_code" != '200' ]]; then
-            echo "GitHub Models preflight failed with HTTP $http_code" >&2
-            jq . /tmp/github-models-test.json >&2 || true
-            exit 1
-          fi
-
-          jq '{model, finish_reason: .choices[0].finish_reason, tool_calls: (.choices[0].message.tool_calls | length)}' \
-            /tmp/github-models-test.json
 
       - name: Configure OCR endpoint
         shell: bash
