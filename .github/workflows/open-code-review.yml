@@ -9,7 +9,6 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  models: read
 
 concurrency:
   group: open-code-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
@@ -55,23 +54,31 @@ jobs:
             core.setOutput('head_sha', pullRequest.head.sha);
             core.setOutput('title', pullRequest.title);
 
+      - name: Install OpenCodeReview CLI
+        shell: bash
+        run: npm install -g '@alibaba-group/open-code-review@1.8.0' >/dev/null
+
       - name: Configure OCR endpoint
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OCR_LLM_AUTH_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
         run: |
-          npm install -g '@alibaba-group/open-code-review@1.8.0' >/dev/null
-          ocr config set llm.url 'https://models.github.ai/inference/chat/completions' >/dev/null
-          ocr config set llm.auth_token "$GITHUB_TOKEN" >/dev/null
-          ocr config set llm.model 'openai/gpt-4.1-mini' >/dev/null
+          if [[ -z "$OCR_LLM_AUTH_TOKEN" ]]; then
+            echo 'OCR_LLM_AUTH_TOKEN repository secret is required.' >&2
+            exit 1
+          fi
+
+          ocr config set llm.url 'https://rainyun-g74a8dea.tail5df4d7.ts.net:10000/v1/chat/completions' >/dev/null
+          ocr config set llm.auth_token "$OCR_LLM_AUTH_TOKEN" >/dev/null
+          ocr config set llm.model 'gpt-5.6-sol' >/dev/null
           ocr config set llm.protocol 'openai' >/dev/null
-          ocr config set llm.extra_body '{"max_completion_tokens":4096}' >/dev/null
+          ocr config set llm.extra_body '{"max_completion_tokens":58888}' >/dev/null
           ocr config set language '中文' >/dev/null
 
       - name: Run OpenCodeReview
         id: ocr
         continue-on-error: true
-        uses: alibaba/open-code-review@v1.8.0
+        uses: alibaba/open-code-review@e670b3b3f6b56ef63f4222148696e315268a26e2 # v1.8.0
         with:
           # The endpoint is configured above so llm.extra_body is not shadowed
           # by the action's OCR_LLM_* environment variables.
@@ -79,7 +86,7 @@ jobs:
           llm_auth_token: ''
           llm_model: ''
           llm_use_anthropic: 'false'
-          llm_extra_body: '{"max_completion_tokens":4096}'
+          llm_extra_body: '{"max_completion_tokens":58888}'
           language: 中文
           base_ref: ${{ steps.pr.outputs.base_ref }}
           head_sha: ${{ steps.pr.outputs.head_sha }}
