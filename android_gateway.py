@@ -66,6 +66,7 @@ class GatewayDecision(BaseModel):
 class GatewayResolution(BaseModel):
     correlation_status: Literal[
         "matched",
+        "notification_only",
         "account_not_configured",
         "account_not_running",
         "not_found",
@@ -163,6 +164,67 @@ def match_remote_session(
     if len(unique) != 1:
         return None
     return next(iter(unique.values()))
+
+
+def notification_context(event: GatewayInboundEvent) -> dict[str, str]:
+    """Build stable, privacy-preserving identifiers from the Android notification."""
+    identity = hashlib.sha256(
+        f"{event.account_id}\0{event.sender_label}".encode("utf-8")
+    ).hexdigest()[:24]
+    synthetic_id = f"android:{identity}"
+    return {
+        "chat_id": synthetic_id,
+        "sender_id": synthetic_id,
+        "sender_name": event.sender_label,
+        "item_id": "",
+    }
+
+
+async def resolve_notification_event(
+    event: GatewayInboundEvent,
+    decide: Callable[..., Awaitable[dict]],
+) -> GatewayResolution:
+    """Resolve an Android event without querying the legacy WebSocket message stream."""
+    context = notification_context(event)
+    raw_decision = await decide(
+        send_user_name=context["sender_name"],
+        send_user_id=context["sender_id"],
+        send_message=event.body,
+        item_id=context["item_id"],
+        chat_id=context["chat_id"],
+        msg_time=event.observed_at.isoformat(),
+        reserve_default_reply=False,
+    )
+    raw_decision = raw_decision if isinstance(raw_decision, dict) else {}
+    raw_action = str(raw_decision.get("action") or "noop")
+    if raw_action == "reply":
+        decision = GatewayDecision(
+            action="reply",
+            text=raw_decision.get("text"),
+            source=raw_decision.get("source"),
+            reason=raw_decision.get("reason") or "matched",
+        )
+    elif raw_action == "image":
+        decision = GatewayDecision(
+            action="unsupported",
+            source=raw_decision.get("source"),
+            reason="android_gateway_image_reply_not_supported",
+        )
+    else:
+        decision = GatewayDecision(
+            action="noop",
+            source=raw_decision.get("source"),
+            reason=raw_decision.get("reason") or "no_reply_rule",
+        )
+
+    return GatewayResolution(
+        correlation_status="notification_only",
+        chat_id=context["chat_id"],
+        sender_id=context["sender_id"],
+        sender_name=context["sender_name"],
+        item_id=context["item_id"],
+        decision=decision,
+    )
 
 
 class GatewayEventStore:

@@ -16051,7 +16051,7 @@ from android_gateway import (
     GatewayResolution,
     GatewayService,
     create_gateway_router,
-    match_remote_session,
+    resolve_notification_event,
 )
 
 
@@ -16094,97 +16094,48 @@ async def _resolve_android_gateway_event(
             ),
         )
 
-    live_instance = _get_chat_live_instance(event.account_id)
-    if not live_instance:
-        return GatewayResolution(
-            correlation_status="account_not_running",
-            decision=GatewayDecision(
-                action="noop",
-                reason="account_not_running",
-            ),
-        )
+    policy_instance = _get_chat_live_instance(event.account_id)
+    manager_bound = policy_instance is not None
+    if policy_instance is None:
+        cookies_str = db_manager.get_cookie(event.account_id)
+        if cookies_str:
+            try:
+                from XianyuAutoAsync import XianyuLive
 
-    owner_user_id = _clean_goofish_id(getattr(live_instance, "myid", None))
-    sessions = []
-    for attempt in range(2):
-        body = await _run_live_instance_on_manager_loop(
-            event.account_id,
-            lambda: live_instance.list_newest_conversations(limit=20),
-            timeout=40,
-        )
-        if isinstance(body, dict) and (body.get("reason") or body.get("code")) and not body.get("userConvs"):
-            raise RuntimeError(
-                body.get("reason") or body.get("developerMessage") or body.get("code")
-            )
-        sessions = [
-            session
-            for raw in (body.get("userConvs", []) if isinstance(body, dict) else [])
-            if (
-                session := _normalize_remote_conversation_session(
-                    raw,
-                    owner_user_id=owner_user_id,
+                policy_instance = XianyuLive(
+                    cookies_str,
+                    cookie_id=event.account_id,
+                    register_instance=False,
                 )
-            )
-        ]
-        matched = match_remote_session(event, sessions)
-        if matched is not None:
-            break
-        if attempt == 0:
-            await asyncio.sleep(0.75)
-    else:
-        matched = None
+            except Exception as exc:
+                logger.warning(
+                    f"Android 网关策略实例创建失败: account={event.account_id}, "
+                    f"error={mask_sensitive_text(exc)}"
+                )
 
-    if matched is None:
+    if policy_instance is None:
         return GatewayResolution(
-            correlation_status="not_found",
+            correlation_status="account_not_configured",
             decision=GatewayDecision(
                 action="noop",
-                reason="conversation_not_uniquely_correlated",
+                reason="account_cookie_not_found",
             ),
         )
 
-    chat_id = str(matched.get("chat_id") or "")
-    sender_id = str(matched.get("sender_id") or matched.get("buyer_id") or "")
-    sender_name = str(
-        matched.get("sender_name")
-        or matched.get("buyer_name")
-        or event.sender_label
-    )
-    item_id = str(matched.get("item_id") or "")
-    decision = await _run_live_instance_on_manager_loop(
-        event.account_id,
-        lambda: live_instance.decide_chat_message_reply(
-            send_user_name=sender_name,
-            send_user_id=sender_id,
-            send_message=event.body,
-            item_id=item_id,
-            chat_id=chat_id,
-            msg_time=event.observed_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
-            reserve_default_reply=False,
-        ),
-        timeout=60,
-    )
+    async def decide(**kwargs):
+        if manager_bound:
+            return await _run_live_instance_on_manager_loop(
+                event.account_id,
+                lambda: policy_instance.decide_chat_message_reply(**kwargs),
+                timeout=60,
+            )
+        return await policy_instance.decide_chat_message_reply(**kwargs)
 
-    raw_action = str(decision.get("action") or "noop")
-    if raw_action == "reply":
-        gateway_decision = GatewayDecision(
-            action="reply",
-            text=decision.get("text"),
-            source=decision.get("source"),
-            reason=decision.get("reason") or "matched",
-        )
-    elif raw_action == "image":
-        gateway_decision = GatewayDecision(
-            action="unsupported",
-            source=decision.get("source"),
-            reason="android_gateway_image_reply_not_supported",
-        )
-    else:
-        gateway_decision = GatewayDecision(
-            action="noop",
-            source=decision.get("source"),
-            reason=decision.get("reason") or "no_reply_rule",
-        )
+    resolution = await resolve_notification_event(event, decide)
+    chat_id = str(resolution.chat_id or "")
+    sender_id = str(resolution.sender_id or "")
+    sender_name = str(resolution.sender_name or event.sender_label)
+    item_id = str(resolution.item_id or "")
 
     if not _gateway_chat_message_exists(
         event.account_id,
@@ -16243,14 +16194,7 @@ async def _resolve_android_gateway_event(
                 f"error={mask_sensitive_text(exc)}"
             )
 
-    return GatewayResolution(
-        correlation_status="matched",
-        chat_id=chat_id,
-        sender_id=sender_id,
-        sender_name=sender_name,
-        item_id=item_id,
-        decision=gateway_decision,
-    )
+    return resolution
 
 
 async def _apply_android_gateway_receipt(

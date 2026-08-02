@@ -1,4 +1,6 @@
+import ast
 import asyncio
+import os
 from datetime import UTC, datetime
 
 import pytest
@@ -14,6 +16,8 @@ from android_gateway import (
     GatewayService,
     GatewaySignatureError,
     match_remote_session,
+    notification_context,
+    resolve_notification_event,
     sign_payload,
     verify_signature,
 )
@@ -77,6 +81,78 @@ def test_match_remote_session_fails_closed_when_body_is_ambiguous() -> None:
     ]
 
     assert match_remote_session(_event(), sessions) is None
+
+
+def test_notification_context_is_stable_and_does_not_expose_labels() -> None:
+    event = _event()
+
+    first = notification_context(event)
+    second = notification_context(event)
+    changed = notification_context(event.model_copy(update={"sender_label": "other"}))
+
+    assert first == second
+    assert first["chat_id"].startswith("android:")
+    assert first["sender_id"].startswith("android:")
+    assert first["item_id"] == ""
+    assert event.account_id not in first["chat_id"]
+    assert event.sender_label not in first["chat_id"]
+    assert changed["chat_id"] != first["chat_id"]
+
+
+def test_notification_event_resolves_without_remote_session_lookup() -> None:
+    calls = []
+
+    async def decide(**kwargs):
+        calls.append(kwargs)
+        return {
+            "action": "reply",
+            "text": "notification-only reply",
+            "source": "keyword",
+            "reason": "matched",
+        }
+
+    resolution = asyncio.run(resolve_notification_event(_event(), decide))
+
+    assert resolution.correlation_status == "notification_only"
+    assert resolution.decision.action == "reply"
+    assert resolution.decision.text == "notification-only reply"
+    assert resolution.item_id == ""
+    assert calls == [
+        {
+            "send_user_name": _event().sender_label,
+            "send_user_id": resolution.sender_id,
+            "send_message": _event().body,
+            "item_id": "",
+            "chat_id": resolution.chat_id,
+            "msg_time": "2026-07-28T08:28:38+00:00",
+            "reserve_default_reply": False,
+        }
+    ]
+
+
+def test_server_gateway_resolver_does_not_query_legacy_message_stream() -> None:
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    source_path = os.path.join(project_root, "reply_server.py")
+    with open(source_path, "r", encoding="utf-8") as source_file:
+        tree = ast.parse(source_file.read())
+
+    resolver = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_resolve_android_gateway_event"
+    )
+    called_names = {
+        node.func.id
+        for node in ast.walk(resolver)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    accessed_attributes = {
+        node.attr for node in ast.walk(resolver) if isinstance(node, ast.Attribute)
+    }
+
+    assert "resolve_notification_event" in called_names
+    assert "list_newest_conversations" not in accessed_attributes
 
 
 def test_gateway_service_caches_decision_for_duplicate_event(tmp_path) -> None:

@@ -5,14 +5,16 @@
 Android 网关只负责稳定取得自有闲鱼账号的新消息、保持目标聊天页、执行一次文本回复，
 业务规则仍由本仓库负责。服务端收到 Android 事件后会：
 
-1. 使用运行中账号主动拉取最近会话；
-2. 仅在“入站方向 + 正文 + 可用昵称”唯一匹配时取得真实 `chat_id`、买家 ID 和商品 ID；
-3. 复用现有优先级链：指定商品回复、关键词、默认回复、AI；
+1. 校验账号白名单、HMAC 签名和事件幂等键；
+2. 以 Android 已确认的发送者标签和正文构造稳定、脱敏的会话上下文；
+3. 直接复用现有关键词、默认回复和 AI 决策链，不连接旧 WebSocket 消息通道；
 4. 返回 `reply`、`noop` 或 `unsupported` 决策；
 5. 等待 Android 的发送回执，再登记默认回复“一次性”状态和发出的聊天记录。
 
-会话无法唯一关联时返回 `noop`，不会猜测目标。图片规则当前返回 `unsupported`，Android
-网关不会把图片标记误发成文本。
+Android 通知和聊天页当前不能稳定提供真实买家 ID、商品 ID 或 WebSocket 会话 ID，所以
+这条通道使用 `android:<hash>` 形式的稳定会话/发送者 ID，并把商品 ID 留空。通用关键词、
+默认回复和 AI 规则可正常工作；依赖精确商品 ID 或真实买家 ID 的规则不会在信息不足时
+猜测匹配。图片规则当前返回 `unsupported`，Android 网关不会把图片标记误发成文本。
 
 ## 配置
 
@@ -29,9 +31,11 @@ ANDROID_GATEWAY_ACCOUNT_IDS=服务端Cookie ID
 docker compose up -d --force-recreate
 ```
 
-`ANDROID_GATEWAY_ACCOUNT_IDS` 中的每个账号必须已经在管理后台导入、启用并处于运行状态。
+`ANDROID_GATEWAY_ACCOUNT_IDS` 中的每个账号必须已经在管理后台导入并保留有效 Cookie，
+但不要求旧 WebSocket 账号实例处于运行状态。
 该变量同时关闭这些账号的 WebSocket 自动回复发送，防止 WebSocket 偶尔恢复时与 Android
-重复回复；WebSocket 连接仍保留，用于主动拉取最近会话和其他既有业务。
+重复回复。WebSocket 仍可服务于未迁移账号或其他既有业务，但 Android 网关的
+`event → decision → receipt` 链路不再调用它。
 
 Android 侧建议通过 Tailscale 地址访问服务。协议还会对每个请求使用
 `HMAC-SHA256(timestamp + "\n" + raw_body)` 签名；服务器只接受五分钟内的请求。事件 ID
