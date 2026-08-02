@@ -28,6 +28,15 @@ class QRLoginCookieTests(unittest.TestCase):
         self.assertIn("let qrLoginMode = 'lite';", app_js)
         self.assertIn("function showQRCodeLogin(mode = 'lite')", app_js)
 
+    def test_qr_frontend_redirects_when_auth_expires(self):
+        app_js = (REPO_ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function handleQRCodeAuthFailure(response)", app_js)
+        self.assertIn("response.status !== 401 && response.status !== 403", app_js)
+        self.assertIn("localStorage.removeItem('auth_token');", app_js)
+        self.assertIn("登录状态已失效，请重新登录", app_js)
+        self.assertGreaterEqual(app_js.count("handleQRCodeAuthFailure(response)"), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

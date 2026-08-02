@@ -14588,6 +14588,21 @@ function getQRLoginEndpoints() {
     };
 }
 
+function handleQRCodeAuthFailure(response) {
+    if (response.status !== 401 && response.status !== 403) {
+        return false;
+    }
+
+    clearQRCodeCheck();
+    localStorage.removeItem('auth_token');
+    authToken = '';
+    showQRCodeError('登录状态已失效，请重新登录');
+    setTimeout(() => {
+        window.location.href = '/login.html';
+    }, 1500);
+    return true;
+}
+
 function applyQRLoginModeChrome() {
     const titleEl = document.getElementById('qrLoginModalTitleText');
     if (titleEl) {
@@ -14679,6 +14694,10 @@ async function generateQRCode() {
         }
     });
 
+    if (handleQRCodeAuthFailure(response)) {
+        return;
+    }
+
     if (response.ok) {
         const data = await response.json();
         if (data.success) {
@@ -14761,6 +14780,11 @@ async function checkQRCodeStatus() {
         'Authorization': `Bearer ${authToken}`
         }
     });
+
+    if (handleQRCodeAuthFailure(response)) {
+        qrCodeVerificationState.completed = true;
+        return;
+    }
 
     if (requestSessionId !== qrCodeVerificationState.activeSessionId || qrCodeVerificationState.completed) {
         return;
