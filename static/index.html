@@ -478,17 +478,11 @@
             <div class="row mb-4">
               <div class="col-12">
                 <div class="d-grid gap-2 d-md-flex justify-content-md-center">
-                  <button type="button" class="btn btn-lg me-md-2 flex-fill qr-login-btn" onclick="showQRCodeLogin()" style="max-width: 300px;">
+                  <button type="button" class="btn btn-lg me-md-2 flex-fill qr-login-btn" onclick="showQRCodeLogin('standard')" style="max-width: 300px;">
                     <i class="bi bi-qr-code me-2"></i>
                     <span class="fw-bold">扫码登录</span>
                     <br>
-                    <small class="opacity-75">适合直接添加新账号</small>
-                  </button>
-                  <button type="button" class="btn btn-outline-info btn-lg me-md-2 flex-fill qr-login-lite-btn" onclick="showQRCodeLogin('lite')" style="max-width: 300px;">
-                    <i class="bi bi-qr-code-scan me-2"></i>
-                    <span class="fw-bold">轻量扫码</span>
-                    <br>
-                    <small class="opacity-75">纯 HTTP，无浏览器，秒级出码</small>
+                    <small class="opacity-75">完成登录交换后保存 Cookie</small>
                   </button>
                   <button type="button" class="btn btn-outline-primary btn-lg flex-fill password-login-btn" onclick="togglePasswordLogin()" style="max-width: 300px;">
                     <i class="bi bi-key me-2"></i>

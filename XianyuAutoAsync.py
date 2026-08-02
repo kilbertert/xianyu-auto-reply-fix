@@ -70,6 +70,15 @@ REQUIRED_SESSION_COOKIE_FIELDS = (
     'cna',
 )
 
+
+def _android_gateway_owns_reply(cookie_id: str) -> bool:
+    managed = {
+        value.strip()
+        for value in os.getenv("ANDROID_GATEWAY_ACCOUNT_IDS", "").split(",")
+        if value.strip()
+    }
+    return str(cookie_id or "").strip() in managed
+
 # 滑块验证补丁已废弃，使用集成的 Playwright 登录方法
 # 不再需要猴子补丁，所有功能已集成到 XianyuSliderStealth 类中
 
@@ -9979,7 +9988,16 @@ class XianyuLive:
             logger.error(f"获取指定商品回复失败: {self._safe_str(e)}")
             return None
 
-    async def get_default_reply(self, send_user_name: str, send_user_id: str, send_message: str, chat_id: str, item_id: str = None) -> str:
+    async def get_default_reply(
+        self,
+        send_user_name: str,
+        send_user_id: str,
+        send_message: str,
+        chat_id: str,
+        item_id: str = None,
+        *,
+        record_reply: bool = True,
+    ) -> str:
         """获取默认回复内容，支持变量替换和只回复一次功能"""
         try:
             from db_manager import db_manager
@@ -10012,7 +10030,7 @@ class XianyuLive:
                 )
 
                 # 如果开启了"只回复一次"功能，记录这次回复
-                if default_reply_settings.get('reply_once', False) and chat_id:
+                if record_reply and default_reply_settings.get('reply_once', False) and chat_id:
                     db_manager.add_default_reply_record(self.cookie_id, chat_id)
                     logger.info(f"【{self.cookie_id}】记录默认回复: chat_id={chat_id}")
 
@@ -15909,6 +15927,12 @@ class XianyuLive:
             item_id: 商品ID
             msg_time: 消息时间
         """
+        if _android_gateway_owns_reply(self.cookie_id):
+            logger.info(
+                f"【{self.cookie_id}】Android 网关已接管自动回复发送，跳过 WebSocket 回复调度"
+            )
+            return
+
         # 提取消息ID并检查是否已处理（优先使用调用链已解出的 messageId，避免重复解同步包）
         message_id = str(dedupe_message_id).strip() if dedupe_message_id else self._extract_message_id(message_data)
         # 如果没有 messageId，使用备用标识（chat_id + send_user_id + send_message + 时间戳）
@@ -16019,6 +16043,115 @@ class XianyuLive:
             self.message_debounce_tasks[chat_id]['task'] = task
             logger.warning(f"【{self.cookie_id}】为chat_id {chat_id} 创建防抖任务，延迟 {self.message_debounce_delay} 秒")
 
+    async def decide_chat_message_reply(
+        self,
+        send_user_name: str,
+        send_user_id: str,
+        send_message: str,
+        item_id: str,
+        chat_id: str,
+        msg_time: str,
+        *,
+        reserve_default_reply: bool = True,
+    ) -> dict:
+        """复用完整自动回复优先级，只返回决策，不执行发送。"""
+        if not AUTO_REPLY.get('enabled', True):
+            logger.info(f"[{msg_time}] 【{self.cookie_id}】【系统】自动回复已禁用")
+            return {'action': 'noop', 'text': None, 'source': None, 'reason': 'auto_reply_disabled'}
+
+        if pause_manager.is_chat_paused(chat_id):
+            remaining_time = pause_manager.get_remaining_pause_time(chat_id)
+            remaining_minutes = remaining_time // 60
+            remaining_seconds = remaining_time % 60
+            logger.info(
+                f"[{msg_time}] 【{self.cookie_id}】【系统】chat_id {chat_id} "
+                f"自动回复已暂停，剩余时间: {remaining_minutes}分{remaining_seconds}秒"
+            )
+            return {'action': 'noop', 'text': None, 'source': None, 'reason': 'chat_paused'}
+
+        blacklist_hit = self._check_buyer_blacklist_for_action(
+            buyer_id=send_user_id,
+            item_id=item_id,
+            buyer_nick=send_user_name,
+            action='自动回复',
+            log_delivery=False,
+        )
+        if blacklist_hit:
+            return {'action': 'noop', 'text': None, 'source': None, 'reason': 'buyer_blacklisted'}
+
+        message_filter_result = await self._apply_message_filters(
+            send_user_name=send_user_name,
+            send_user_id=send_user_id,
+            send_message=send_message,
+            item_id=item_id,
+            chat_id=chat_id,
+            msg_time=msg_time,
+            message_source='user',
+            execute_actions=False,
+        )
+        if message_filter_result.get('skip_auto_reply'):
+            logger.info(f"[{msg_time}] 【{self.cookie_id}】命中消息过滤规则，跳过自动回复")
+            return {'action': 'noop', 'text': None, 'source': None, 'reason': 'message_filtered'}
+        skip_ai_reply = bool(message_filter_result.get('skip_ai_reply'))
+
+        reply = await self.get_item_specific_reply(
+            send_user_name, send_user_id, send_message, item_id
+        )
+        reply_source = '指定商品' if reply else None
+
+        if not reply:
+            reply = await self.get_keyword_reply(
+                send_user_name, send_user_id, send_message, item_id
+            )
+            if reply == "EMPTY_REPLY":
+                logger.info(f"[{msg_time}] 【{self.cookie_id}】匹配到空回复关键词，跳过自动回复")
+                return {'action': 'noop', 'text': None, 'source': '关键词', 'reason': 'empty_keyword_reply'}
+            if reply:
+                reply_source = '关键词'
+
+        if not reply:
+            reply = await self.get_default_reply(
+                send_user_name,
+                send_user_id,
+                send_message,
+                chat_id,
+                item_id,
+                record_reply=reserve_default_reply,
+            )
+            if reply == "EMPTY_REPLY":
+                logger.info(f"[{msg_time}] 【{self.cookie_id}】默认回复内容为空，跳过自动回复")
+                return {'action': 'noop', 'text': None, 'source': '默认', 'reason': 'empty_default_reply'}
+            if reply == "SKIP_REPLY":
+                logger.info(f"[{msg_time}] 【{self.cookie_id}】默认回复已命中过当前会话，跳过自动回复")
+                return {'action': 'noop', 'text': None, 'source': '默认', 'reason': 'default_reply_once'}
+            if reply:
+                reply_source = '默认'
+
+        if not reply and not skip_ai_reply:
+            reply = await self.get_ai_reply(
+                send_user_name, send_user_id, send_message, item_id, chat_id
+            )
+            if reply:
+                reply_source = 'AI'
+        elif not reply:
+            logger.info(f"[{msg_time}] 【{self.cookie_id}】命中消息过滤规则，跳过AI回复")
+
+        if not reply:
+            return {'action': 'noop', 'text': None, 'source': None, 'reason': 'no_reply_rule'}
+        if reply.startswith("__IMAGE_SEND__"):
+            return {
+                'action': 'image',
+                'image_url': reply.replace("__IMAGE_SEND__", "", 1),
+                'source': reply_source,
+                'reason': 'matched',
+            }
+        return {
+            'action': 'reply',
+            'text': reply,
+            'source': reply_source,
+            'reason': 'matched',
+        }
+
     async def _process_chat_message_reply(self, message_data: dict, websocket, send_user_name: str,
                                          send_user_id: str, send_message: str, item_id: str,
                                          chat_id: str, msg_time: str):
@@ -16036,91 +16169,26 @@ class XianyuLive:
             msg_time: 消息时间
         """
         try:
-            # 自动回复消息
-            if not AUTO_REPLY.get('enabled', True):
-                logger.info(f"[{msg_time}] 【{self.cookie_id}】【系统】自动回复已禁用")
-                return
-
-            # 检查该chat_id是否处于暂停状态
-            if pause_manager.is_chat_paused(chat_id):
-                remaining_time = pause_manager.get_remaining_pause_time(chat_id)
-                remaining_minutes = remaining_time // 60
-                remaining_seconds = remaining_time % 60
-                logger.info(f"[{msg_time}] 【{self.cookie_id}】【系统】chat_id {chat_id} 自动回复已暂停，剩余时间: {remaining_minutes}分{remaining_seconds}秒")
-                return
-
-            blacklist_hit = self._check_buyer_blacklist_for_action(
-                buyer_id=send_user_id,
-                item_id=item_id,
-                buyer_nick=send_user_name,
-                action='自动回复',
-                log_delivery=False,
-            )
-            if blacklist_hit:
-                return
-
-            message_filter_result = await self._apply_message_filters(
+            decision = await self.decide_chat_message_reply(
                 send_user_name=send_user_name,
                 send_user_id=send_user_id,
                 send_message=send_message,
                 item_id=item_id,
                 chat_id=chat_id,
                 msg_time=msg_time,
-                message_source='user',
-                execute_actions=False,
+                reserve_default_reply=True,
             )
-            if message_filter_result.get('skip_auto_reply'):
-                logger.info(f"[{msg_time}] 【{self.cookie_id}】命中消息过滤规则，跳过自动回复")
-                return
-            skip_ai_reply = bool(message_filter_result.get('skip_ai_reply'))
-
-            reply = None
-            reply_source = None
-
-            # 按 README 定义的优先级处理：
-            # 指定商品回复 > 商品专用关键词 > 通用关键词 > 默认回复 > AI回复
-            reply = await self.get_item_specific_reply(send_user_name, send_user_id, send_message, item_id)
-            if reply:
-                reply_source = '指定商品'
-            else:
-                # 1. 尝试关键词匹配（内部已区分商品专用关键词和通用关键词）
-                reply = await self.get_keyword_reply(send_user_name, send_user_id, send_message, item_id)
-                if reply == "EMPTY_REPLY":
-                    # 匹配到关键词但回复内容为空，不进行任何回复
-                    logger.info(f"[{msg_time}] 【{self.cookie_id}】匹配到空回复关键词，跳过自动回复")
-                    return
-                elif reply:
-                    reply_source = '关键词'  # 标记为关键词回复
-                else:
-                    # 2. 关键词匹配失败后，使用默认回复兜底
-                    reply = await self.get_default_reply(send_user_name, send_user_id, send_message, chat_id, item_id)
-                    if reply == "EMPTY_REPLY":
-                        logger.info(f"[{msg_time}] 【{self.cookie_id}】默认回复内容为空，跳过自动回复")
-                        return
-                    elif reply == "SKIP_REPLY":
-                        logger.info(f"[{msg_time}] 【{self.cookie_id}】默认回复已命中过当前会话，跳过自动回复")
-                        return
-                    elif reply:
-                        reply_source = '默认'
-                    else:
-                        # 3. 最后尝试AI回复
-                        if skip_ai_reply:
-                            logger.info(f"[{msg_time}] 【{self.cookie_id}】命中消息过滤规则，跳过AI回复")
-                        else:
-                            reply = await self.get_ai_reply(send_user_name, send_user_id, send_message, item_id, chat_id)
-                            if reply:
-                                reply_source = 'AI'
+            reply = decision.get('text')
+            reply_source = decision.get('source')
 
             # 注意：这里只有商品ID，没有标题和详情，根据新的规则不保存到数据库
             # 商品信息会在其他有完整信息的地方保存（如发货规则匹配时）
             # 消息通知已在收到消息时立即发送，此处不再重复发送
 
             # 如果有回复内容，发送消息
-            if reply:
-                # 检查是否是图片发送标记
-                if reply.startswith("__IMAGE_SEND__"):
-                    # 提取图片URL（关键词回复不包含卡券ID）
-                    image_url = reply.replace("__IMAGE_SEND__", "")
+            if decision.get('action') in {'reply', 'image'}:
+                if decision.get('action') == 'image':
+                    image_url = decision.get('image_url')
                     # 发送图片消息
                     try:
                         await self.send_image_msg(websocket, chat_id, send_user_id, image_url)

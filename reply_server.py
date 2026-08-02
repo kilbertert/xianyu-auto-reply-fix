@@ -16040,3 +16040,242 @@ async def scheduled_task_checker():
 # 移除自动启动，由Start.py或手动启动
 # if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=8080)
+
+
+# ==================== Android 消息网关 ====================
+
+from android_gateway import (
+    GatewayDecision,
+    GatewayEventStore,
+    GatewayInboundEvent,
+    GatewayResolution,
+    GatewayService,
+    create_gateway_router,
+    resolve_notification_event,
+)
+
+
+def _android_gateway_account_ids() -> set[str]:
+    return {
+        value.strip()
+        for value in os.getenv("ANDROID_GATEWAY_ACCOUNT_IDS", "").split(",")
+        if value.strip()
+    }
+
+
+def _gateway_chat_message_exists(
+    cookie_id: str,
+    chat_id: str,
+    sender_id: str,
+    content: str,
+    direction: int,
+) -> bool:
+    try:
+        recent = db_manager.get_chat_messages(cookie_id, chat_id, limit=20)
+    except Exception:
+        return False
+    return any(
+        str(message.get("sender_id") or "") == str(sender_id or "")
+        and str(message.get("content") or "") == str(content or "")
+        and int(message.get("direction") or 0) == direction
+        for message in recent
+    )
+
+
+async def _resolve_android_gateway_event(
+    event: GatewayInboundEvent,
+) -> GatewayResolution:
+    if event.account_id not in _android_gateway_account_ids():
+        return GatewayResolution(
+            correlation_status="account_not_configured",
+            decision=GatewayDecision(
+                action="noop",
+                reason="account_not_configured",
+            ),
+        )
+
+    policy_instance = _get_chat_live_instance(event.account_id)
+    manager_bound = policy_instance is not None
+    if policy_instance is None:
+        cookies_str = db_manager.get_cookie(event.account_id)
+        if cookies_str:
+            try:
+                from XianyuAutoAsync import XianyuLive
+
+                policy_instance = XianyuLive(
+                    cookies_str,
+                    cookie_id=event.account_id,
+                    register_instance=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Android 网关策略实例创建失败: account={event.account_id}, "
+                    f"error={mask_sensitive_text(exc)}"
+                )
+
+    if policy_instance is None:
+        return GatewayResolution(
+            correlation_status="account_not_configured",
+            decision=GatewayDecision(
+                action="noop",
+                reason="account_cookie_not_found",
+            ),
+        )
+
+    async def decide(**kwargs):
+        if manager_bound:
+            return await _run_live_instance_on_manager_loop(
+                event.account_id,
+                lambda: policy_instance.decide_chat_message_reply(**kwargs),
+                timeout=60,
+            )
+        return await policy_instance.decide_chat_message_reply(**kwargs)
+
+    resolution = await resolve_notification_event(event, decide)
+    chat_id = str(resolution.chat_id or "")
+    sender_id = str(resolution.sender_id or "")
+    sender_name = str(resolution.sender_name or event.sender_label)
+    item_id = str(resolution.item_id or "")
+
+    if not _gateway_chat_message_exists(
+        event.account_id,
+        chat_id,
+        sender_id,
+        event.body,
+        2,
+    ):
+        try:
+            from chat_event_hub import publish_chat_message
+
+            extra_json = json.dumps(
+                {
+                    "source": "android_gateway",
+                    "event_id": event.event_id,
+                    "notification_id": event.notification_id,
+                },
+                ensure_ascii=False,
+            )
+            message_id = db_manager.save_chat_message(
+                cookie_id=event.account_id,
+                chat_id=chat_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                content=event.body,
+                content_type=1,
+                image_url=None,
+                item_id=item_id,
+                direction=2,
+                reply_source=None,
+                media_url=None,
+                link_url=None,
+                extra_json=extra_json,
+            )
+            publish_chat_message(
+                event.account_id,
+                {
+                    "msg_id": message_id,
+                    "chat_id": chat_id,
+                    "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "content": event.body,
+                    "content_type": 1,
+                    "image_url": None,
+                    "item_id": item_id,
+                    "direction": 2,
+                    "reply_source": None,
+                    "media_url": None,
+                    "link_url": None,
+                    "extra_json": extra_json,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Android 网关入站消息落库失败: event_id={event.event_id}, "
+                f"error={mask_sensitive_text(exc)}"
+            )
+
+    return resolution
+
+
+async def _apply_android_gateway_receipt(
+    event: GatewayInboundEvent,
+    resolution: GatewayResolution,
+    outcome: str,
+) -> None:
+    if outcome != "sent" or resolution.decision.action != "reply":
+        return
+
+    if resolution.decision.source == "默认":
+        settings = db_manager.get_default_reply(event.account_id)
+        if settings and settings.get("reply_once", False):
+            db_manager.add_default_reply_record(
+                event.account_id,
+                resolution.chat_id,
+            )
+
+    from chat_event_hub import publish_chat_message
+
+    live_instance = _get_chat_live_instance(event.account_id)
+    sender_id = str(getattr(live_instance, "myid", None) or event.account_id)
+    content = str(resolution.decision.text or "")
+    if _gateway_chat_message_exists(
+        event.account_id,
+        resolution.chat_id,
+        sender_id,
+        content,
+        1,
+    ):
+        return
+    extra_json = json.dumps(
+        {
+            "source": "android_gateway",
+            "event_id": event.event_id,
+        },
+        ensure_ascii=False,
+    )
+    message_id = db_manager.save_chat_message(
+        cookie_id=event.account_id,
+        chat_id=resolution.chat_id,
+        sender_id=sender_id,
+        sender_name=event.account_id,
+        content=content,
+        content_type=1,
+        image_url=None,
+        item_id=resolution.item_id,
+        direction=1,
+        reply_source=resolution.decision.source,
+        media_url=None,
+        link_url=None,
+        extra_json=extra_json,
+    )
+    publish_chat_message(
+        event.account_id,
+        {
+            "msg_id": message_id,
+            "chat_id": resolution.chat_id,
+            "sender_id": sender_id,
+            "sender_name": event.account_id,
+            "content": content,
+            "content_type": 1,
+            "image_url": None,
+            "item_id": resolution.item_id,
+            "direction": 1,
+            "reply_source": resolution.decision.source,
+            "media_url": None,
+            "link_url": None,
+            "extra_json": extra_json,
+        },
+    )
+
+
+android_gateway_service = GatewayService(
+    GatewayEventStore(os.getenv("DB_PATH", "data/xianyu_data.db")),
+    resolve=_resolve_android_gateway_event,
+    apply_receipt=_apply_android_gateway_receipt,
+)
+app.include_router(
+    create_gateway_router(
+        android_gateway_service,
+        secret=os.getenv("ANDROID_GATEWAY_SHARED_SECRET", "").strip(),
+    )
+)
