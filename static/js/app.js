@@ -14566,7 +14566,7 @@ function resetPasswordLoginForm() {
 let qrCodeCheckInterval = null;
 let qrCodeSessionId = null;
 let qrCodeModalEventsBound = false;
-let qrLoginMode = 'lite'; // 默认使用会完成 login_token 交换的纯 HTTP 流程
+let qrLoginMode = 'standard'; // 默认使用可处理风控验证并完成 Cookie 获取的浏览器流程
 let qrCodeVerificationState = {
     renderKey: '',
     toastShown: false,
@@ -14661,7 +14661,7 @@ function initializeQRCodeLoginModal() {
 }
 
 // 显示扫码登录模态框
-function showQRCodeLogin(mode = 'lite') {
+function showQRCodeLogin(mode = 'standard') {
     qrLoginMode = mode === 'lite' ? 'lite' : 'standard';
     applyQRLoginModeChrome();
     const modalElement = initializeQRCodeLoginModal();

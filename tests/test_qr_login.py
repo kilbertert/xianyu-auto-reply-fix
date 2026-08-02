@@ -19,14 +19,14 @@ class QRLoginCookieTests(unittest.TestCase):
         self.assertEqual(cookies[0]["url"], "https://passport.goofish.com")
         self.assertNotIn("path", cookies[0])
 
-    def test_primary_frontend_action_uses_completed_login_exchange(self):
+    def test_primary_frontend_action_uses_risk_control_capable_flow(self):
         index_html = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
 
-        self.assertIn('class="btn btn-lg me-md-2 flex-fill qr-login-btn" onclick="showQRCodeLogin(\'lite\')"', index_html)
+        self.assertIn('class="btn btn-lg me-md-2 flex-fill qr-login-btn" onclick="showQRCodeLogin(\'standard\')"', index_html)
         self.assertNotIn("qr-login-lite-btn", index_html)
-        self.assertIn("let qrLoginMode = 'lite';", app_js)
-        self.assertIn("function showQRCodeLogin(mode = 'lite')", app_js)
+        self.assertIn("let qrLoginMode = 'standard';", app_js)
+        self.assertIn("function showQRCodeLogin(mode = 'standard')", app_js)
 
     def test_qr_frontend_redirects_when_auth_expires(self):
         app_js = (REPO_ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
