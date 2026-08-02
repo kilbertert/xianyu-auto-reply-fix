@@ -157,6 +157,13 @@ class _DetachedPunishFrame:
 
 
 class SliderVerificationGuardsTest(unittest.TestCase):
+    def test_refresh_listener_packet_scan_has_timeout(self):
+        refresh_util_path = os.path.join(PROJECT_ROOT, "utils", "refresh_util.py")
+        with open(refresh_util_path, "r", encoding="utf-8") as source_file:
+            source = source_file.read()
+
+        self.assertIn("self.page.listen.steps(count=10, timeout=3)", source)
+
     def _make_slider(self, page):
         slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
         slider.pure_user_id = "unit_test_account"
