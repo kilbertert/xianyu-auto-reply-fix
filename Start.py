@@ -528,6 +528,9 @@ async def main():
     # 1) 从数据库加载的 Cookie 已经在 CookieManager 初始化时完成
     # 为每个启用的 Cookie 启动任务
     for cid, val in manager.cookies.items():
+        if cm.android_gateway_owns_transport(cid):
+            logger.info(f"Android 网关已接管消息传输，跳过 WebSocket Cookie 任务: {cid}")
+            continue
         # 检查账号是否启用
         if not manager.get_cookie_status(cid):
             logger.info(f"跳过禁用的 Cookie: {cid}")

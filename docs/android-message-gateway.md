@@ -34,7 +34,8 @@ docker compose up -d --force-recreate
 `ANDROID_GATEWAY_ACCOUNT_IDS` 中的每个账号必须已经在管理后台导入并保留有效 Cookie，
 但不要求旧 WebSocket 账号实例处于运行状态。
 该变量同时关闭这些账号的 WebSocket 自动回复发送，防止 WebSocket 偶尔恢复时与 Android
-重复回复。WebSocket 仍可服务于未迁移账号或其他既有业务，但 Android 网关的
+重复回复，并在 9090 启动、Cookie 导入或刷新时跳过这些账号的 WebSocket 任务。
+WebSocket 仍可服务于未迁移账号或其他既有业务，但 Android 网关的
 `event → decision → receipt` 链路不再调用它。
 
 Android 侧建议通过 Tailscale 地址访问服务。协议还会对每个请求使用

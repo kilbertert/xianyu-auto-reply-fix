@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 
 from XianyuAutoAsync import XianyuLive, _android_gateway_owns_reply
+from cookie_manager import android_gateway_owns_transport
 
 
 def _live() -> XianyuLive:
@@ -20,6 +21,8 @@ class AndroidGatewayDecisionTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(_android_gateway_owns_reply("account-001"))
             self.assertFalse(_android_gateway_owns_reply("account-003"))
+            self.assertTrue(android_gateway_owns_transport("account-002"))
+            self.assertFalse(android_gateway_owns_transport("account-003"))
 
     async def test_keyword_decision_reuses_existing_priority_without_sending(self):
         live = _live()
