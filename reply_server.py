@@ -16131,7 +16131,11 @@ async def _resolve_android_gateway_event(
             )
         return await policy_instance.decide_chat_message_reply(**kwargs)
 
-    resolution = await resolve_notification_event(event, decide)
+    sessions = db_manager.get_chat_sessions(event.account_id, limit=100)
+    resolution = await resolve_notification_event(event, sessions, decide)
+    if resolution.correlation_status != "matched":
+        return resolution
+
     chat_id = str(resolution.chat_id or "")
     sender_id = str(resolution.sender_id or "")
     sender_name = str(resolution.sender_name or event.sender_label)

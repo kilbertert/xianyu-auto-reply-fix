@@ -7,7 +7,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -31,6 +31,10 @@ class GatewayInboundEvent(BaseModel):
     sender_label: str = Field(min_length=1, max_length=256)
     body: str = Field(min_length=1, max_length=10_000)
     observed_at: datetime
+    chat_id: str | None = Field(default=None, max_length=256)
+    sender_id: str | None = Field(default=None, max_length=256)
+    item_id: str | None = Field(default=None, max_length=256)
+    correlation_source: Literal["android_activity_intent"] | None = None
 
     @field_validator(
         "event_id",
@@ -46,6 +50,14 @@ class GatewayInboundEvent(BaseModel):
         if not cleaned:
             raise ValueError("must not be blank")
         return cleaned
+
+    @field_validator("chat_id", "sender_id", "item_id")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
 
 class GatewayDecision(BaseModel):
@@ -129,20 +141,35 @@ def _normalize_message_text(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
-def match_remote_session(
+def _is_recent_session(event: GatewayInboundEvent, session: dict) -> bool:
+    value = session.get("created_at")
+    if isinstance(value, datetime):
+        created_at = value
+    else:
+        try:
+            created_at = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone(timedelta(hours=8)))
+    return abs((event.observed_at - created_at).total_seconds()) <= 300
+
+
+def _matching_remote_sessions(
     event: GatewayInboundEvent,
     sessions: Iterable[dict],
-) -> dict | None:
+) -> list[dict]:
     body = _normalize_message_text(event.body)
     summary = body[:80]
     candidates: list[dict] = []
     for session in sessions:
-        if int(session.get("direction") or 0) != 2:
+        if int(session.get("direction") or 0) != 2 or not _is_recent_session(
+            event, session
+        ):
             continue
         content = _normalize_message_text(session.get("content"))
-        if content not in {body, summary}:
-            continue
-        candidates.append(session)
+        if content in {body, summary}:
+            candidates.append(session)
 
     sender_label = _normalize_message_text(event.sender_label)
     sender_matches = [
@@ -153,13 +180,28 @@ def match_remote_session(
         )
         == sender_label
     ]
-    if sender_matches:
-        candidates = sender_matches
+    return sender_matches or candidates
+
+
+def _session_identity_key(session: dict) -> tuple[str, str, str] | None:
+    chat_id = str(session.get("chat_id") or "").strip()
+    sender_id = str(session.get("sender_id") or session.get("buyer_id") or "").strip()
+    item_id = str(session.get("item_id") or "").strip()
+    if not chat_id or chat_id.startswith("android:") or not sender_id:
+        return None
+    return chat_id, sender_id, item_id
+
+
+def match_remote_session(
+    event: GatewayInboundEvent,
+    sessions: Iterable[dict],
+) -> dict | None:
+    candidates = _matching_remote_sessions(event, sessions)
 
     unique = {
-        str(session.get("chat_id") or "").strip(): session
+        identity: session
         for session in candidates
-        if str(session.get("chat_id") or "").strip()
+        if (identity := _session_identity_key(session)) is not None
     }
     if len(unique) != 1:
         return None
@@ -182,10 +224,54 @@ def notification_context(event: GatewayInboundEvent) -> dict[str, str]:
 
 async def resolve_notification_event(
     event: GatewayInboundEvent,
+    sessions: Iterable[dict],
     decide: Callable[..., Awaitable[dict]],
 ) -> GatewayResolution:
-    """Resolve an Android event without querying the legacy WebSocket message stream."""
-    context = notification_context(event)
+    """Resolve only against a unique, real session supplied by the local cache."""
+    session_list = list(sessions)
+    matched = match_remote_session(event, session_list)
+    if (
+        event.correlation_source == "android_activity_intent"
+        and event.chat_id
+        and event.sender_id
+    ):
+        context = {
+            "chat_id": event.chat_id,
+            "sender_id": event.sender_id,
+            "sender_name": event.sender_label,
+            "item_id": event.item_id or "",
+        }
+    elif matched is None:
+        candidate_identities = {
+            identity
+            for session in _matching_remote_sessions(event, session_list)
+            if (identity := _session_identity_key(session)) is not None
+        }
+        return GatewayResolution(
+            correlation_status="ambiguous" if len(candidate_identities) > 1 else "not_found",
+            decision=GatewayDecision(
+                action="noop",
+                reason=(
+                    "identity_ambiguous"
+                    if len(candidate_identities) > 1
+                    else "identity_not_correlated"
+                ),
+            ),
+        )
+
+    else:
+        context = {
+            "chat_id": str(matched.get("chat_id") or "").strip(),
+            "sender_id": str(
+                matched.get("sender_id") or matched.get("buyer_id") or ""
+            ).strip(),
+            "sender_name": str(
+                matched.get("sender_name")
+                or matched.get("buyer_name")
+                or event.sender_label
+            ).strip(),
+            "item_id": str(matched.get("item_id") or "").strip(),
+        }
     raw_decision = await decide(
         send_user_name=context["sender_name"],
         send_user_id=context["sender_id"],
@@ -218,7 +304,7 @@ async def resolve_notification_event(
         )
 
     return GatewayResolution(
-        correlation_status="notification_only",
+        correlation_status="matched",
         chat_id=context["chat_id"],
         sender_id=context["sender_id"],
         sender_name=context["sender_name"],

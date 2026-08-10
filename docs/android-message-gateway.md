@@ -1,74 +1,129 @@
-# Android 消息网关
+# Android 消息网关后台接入
 
-## 定位
+本服务在 Android 网关模式下只承担业务后台：接收手机侧签名事件、关联真实会话、运行现有
+关键词/默认回复/过滤/AI 策略、保存幂等决策和回执。通知发现、打开聊天、输入和点击发送均由
+`XianyuMessageAutomation` 完成。
 
-Android 网关只负责稳定取得自有闲鱼账号的新消息、保持目标聊天页、执行一次文本回复，
-业务规则仍由本仓库负责。服务端收到 Android 事件后会：
+## 业务链路
 
-1. 校验账号白名单、HMAC 签名和事件幂等键；
-2. 以 Android 已确认的发送者标签和正文构造稳定、脱敏的会话上下文；
-3. 直接复用现有关键词、默认回复和 AI 决策链，不连接旧 WebSocket 消息通道；
-4. 返回 `reply`、`noop` 或 `unsupported` 决策；
-5. 等待 Android 的发送回执，再登记默认回复“一次性”状态和发出的聊天记录。
+```mermaid
+sequenceDiagram
+    participant G as Android 网关
+    participant A as 9090 Gateway API
+    participant D as SQLite
+    participant P as 现有回复策略
 
-Android 通知和聊天页当前不能稳定提供真实买家 ID、商品 ID 或 WebSocket 会话 ID，所以
-这条通道使用 `android:<hash>` 形式的稳定会话/发送者 ID，并把商品 ID 留空。通用关键词、
-默认回复和 AI 规则可正常工作；依赖精确商品 ID 或真实买家 ID 的规则不会在信息不足时
-猜测匹配。图片规则当前返回 `unsupported`，Android 网关不会把图片标记误发成文本。
+    G->>A: POST /events（HMAC + event_id）
+    A->>D: 幂等保存原始事件
+    A->>D: 读取最近本地聊天会话
+    alt 事件含完整显式身份或唯一近期会话
+        A->>P: decide_chat_message_reply
+        P-->>A: reply / noop / image
+    else 身份缺失或歧义
+        A-->>A: noop，失败关闭
+    end
+    A->>D: 保存关联结果与决策
+    A-->>G: 返回缓存或新决策
+    G->>G: 在当前聊天最多点击一次发送
+    G->>A: POST /events/{event_id}/receipt
+    A->>D: 幂等应用 sent / skipped / send_unconfirmed / failed
+```
+
+迁移账号由 `ANDROID_GATEWAY_ACCOUNT_IDS` 声明。后台不会为这些账号启动或恢复旧 WebSocket
+自动回复通道；未迁移账号的既有行为不变。
 
 ## 配置
 
-在服务器 `.env` 中设置：
+在 `.env` 设置：
 
 ```dotenv
-ANDROID_GATEWAY_SHARED_SECRET=使用密码生成器产生的长随机值
-ANDROID_GATEWAY_ACCOUNT_IDS=服务端Cookie ID
+ANDROID_GATEWAY_SHARED_SECRET=长随机共享密钥
+ANDROID_GATEWAY_ACCOUNT_IDS=CookieID1,CookieID2
 ```
 
-然后重建或重启 Compose 服务，使变量进入容器：
+共享密钥必须与 Android 网关一致，不得提交到 Git。修改后重新创建服务：
 
 ```bash
 docker compose up -d --force-recreate
-```
-
-`ANDROID_GATEWAY_ACCOUNT_IDS` 中的每个账号必须已经在管理后台导入并保留有效 Cookie，
-但不要求旧 WebSocket 账号实例处于运行状态。
-该变量同时关闭这些账号的 WebSocket 自动回复发送，防止 WebSocket 偶尔恢复时与 Android
-重复回复，并在 9090 启动、Cookie 导入或刷新时跳过这些账号的 WebSocket 任务。
-WebSocket 仍可服务于未迁移账号或其他既有业务，但 Android 网关的
-`event → decision → receipt` 链路不再调用它。
-
-Android 侧建议通过 Tailscale 地址访问服务。协议还会对每个请求使用
-`HMAC-SHA256(timestamp + "\n" + raw_body)` 签名；服务器只接受五分钟内的请求。事件 ID
-在 SQLite 的 `android_gateway_events` 表中唯一，重复投递返回已经缓存的决策；发送回执也
-是幂等的。
-
-健康检查：
-
-```bash
 curl http://127.0.0.1:8090/api/android-gateway/v1/health
 ```
 
-`enabled: false` 表示共享密钥没有进入容器。
+健康响应应包含 `ok=true`、`enabled=true` 和
+`service=android-message-gateway`。账号还必须在“账号管理”中保存有效 Cookie；Cookie 只用于
+构造业务策略实例，Android 消息接收与发送不依赖旧 WebSocket。
 
-## API
+## 事件协议
 
-- `GET /api/android-gateway/v1/health`
-- `POST /api/android-gateway/v1/events`
-- `POST /api/android-gateway/v1/events/{event_id}/receipt`
+`POST /api/android-gateway/v1/events` 请求正文：
 
-两个 POST 请求必须包含：
+```json
+{
+  "event_id": "SHA-256",
+  "device_id": "android-primary",
+  "account_id": "后台 Cookie ID",
+  "notification_id": "通知指纹",
+  "sender_label": "x***3",
+  "body": "消息正文",
+  "observed_at": "2026-08-10T08:00:00Z",
+  "chat_id": "可选真实会话 ID",
+  "sender_id": "可选真实买家 ID",
+  "item_id": "可选真实商品 ID",
+  "correlation_source": "android_activity_intent"
+}
+```
 
-- `X-Gateway-Timestamp`
-- `X-Gateway-Signature`
-- `Content-Type: application/json`
+两个 POST 接口均使用：
 
-服务端保存事件、决策和回执状态，用于审计与幂等恢复。共享密钥不得写入仓库、日志或
-请求正文。
+```text
+X-Gateway-Timestamp: Unix 秒
+X-Gateway-Signature: HMAC-SHA256(secret, timestamp + "\n" + raw_body)
+```
 
-## 发送一致性
+时间差超过 300 秒、签名错误、账号不在白名单或正文不合法均被拒绝。`event_id` 是幂等主键，
+重复请求返回已经保存的决策，不重复运行策略。
 
-服务端负责“同一事件只做一次业务决策”，Android 端负责“同一事件最多点击一次发送”。
-Android 会在点击前持久化 `sending` 阶段；如果进程恰在点击边界崩溃，恢复时会回报
-`send_unconfirmed`，不会自动再次点击。这个选择优先避免重复回复，未确认事件需要人工
-检查聊天页。
+## 身份与商品关联
+
+只有以下两类证据可以得到 `correlation_status=matched`：
+
+1. 受 HMAC 保护的事件声明 `correlation_source=android_activity_intent`，且 `chat_id` 与
+   `sender_id` 同时非空；`item_id` 可为空；
+2. SQLite 本地聊天缓存中存在五分钟内、方向为入站、规范化正文一致、真实
+   `chat_id/sender_id/item_id` 上下文唯一的记录。遮罩昵称只能缩小候选范围；同一会话出现
+   冲突商品 ID 也视为歧义。
+
+本路径不会调用 `list_newest_conversations`，因此没有旧 WebSocket 消息查询硬依赖。系统也不
+再用遮罩昵称生成 `android:<hash>` 身份。无法唯一关联时：
+
+| 场景 | 返回 | 副作用 |
+|---|---|---|
+| 没有真实候选 | `noop/identity_not_correlated` | 不调用策略、不写聊天记录、不发送 |
+| 多个真实候选 | `noop/identity_ambiguous` | 不调用策略、不写聊天记录、不发送 |
+| 唯一真实候选 | `matched` | 运行现有策略，保留真实买家/商品上下文 |
+
+这个取舍允许安全漏回，不允许把一个买家的需求或商品上下文串到另一个会话。
+
+## 决策与回执
+
+| 策略结果 | 网关决策 | Android 行为 |
+|---|---|---|
+| 文本 | `reply` | 精确输入并最多点击一次发送 |
+| 无回复或被过滤 | `noop` | 不触碰输入框，回执 `skipped` |
+| 图片 | `unsupported` | 当前不发送，回执 `failed` |
+
+Android 随后提交 `sent`、`skipped`、`send_unconfirmed` 或 `failed`。只有
+`sent + reply` 才幂等写出站聊天记录并应用“默认回复仅一次”等后续副作用。
+
+## 审计与排障
+
+SQLite 表 `android_gateway_events` 保存 `event_json`、`resolution_json`、决策时间、回执和完成
+时间。排障顺序：
+
+1. 健康接口是否 `enabled=true`；
+2. `account_id` 是否在白名单且 Cookie 有效；
+3. `correlation_status` 与 `decision.reason`；
+4. `receipt_outcome` 是否存在；
+5. Android 网关日志中的同一 `event_id`。
+
+`not_found/ambiguous` 是主动安全拒绝，不应通过放宽时间窗或允许非唯一候选绕过。手机或闲鱼
+版本变化后，应先重新验证 Activity Intent 是否仍提供完整显式身份，再恢复无人值守回复。

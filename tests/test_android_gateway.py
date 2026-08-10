@@ -44,6 +44,7 @@ def test_match_remote_session_requires_one_inbound_body_match() -> None:
             "content": "请问还在吗",
             "item_id": "item-001",
             "direction": 2,
+            "created_at": "2026-07-28 16:28:38",
         },
         {
             "chat_id": "chat-002",
@@ -52,6 +53,7 @@ def test_match_remote_session_requires_one_inbound_body_match() -> None:
             "content": "别的消息",
             "item_id": "item-002",
             "direction": 2,
+            "created_at": "2026-07-28 16:28:38",
         },
     ]
 
@@ -70,6 +72,7 @@ def test_match_remote_session_fails_closed_when_body_is_ambiguous() -> None:
             "sender_name": "",
             "content": "请问还在吗",
             "direction": 2,
+            "created_at": "2026-07-28 16:28:38",
         },
         {
             "chat_id": "chat-002",
@@ -77,6 +80,7 @@ def test_match_remote_session_fails_closed_when_body_is_ambiguous() -> None:
             "sender_name": "",
             "content": "请问还在吗",
             "direction": 2,
+            "created_at": "2026-07-28 16:28:38",
         },
     ]
 
@@ -99,7 +103,21 @@ def test_notification_context_is_stable_and_does_not_expose_labels() -> None:
     assert changed["chat_id"] != first["chat_id"]
 
 
-def test_notification_event_resolves_without_remote_session_lookup() -> None:
+def test_match_remote_session_rejects_stale_same_text() -> None:
+    session = {
+        "chat_id": "chat-001",
+        "sender_id": "buyer-001",
+        "sender_name": _event().sender_label,
+        "content": _event().body,
+        "item_id": "item-001",
+        "direction": 2,
+        "created_at": "2026-07-28 16:20:00",
+    }
+
+    assert match_remote_session(_event(), [session]) is None
+
+
+def test_notification_event_fails_closed_without_a_unique_session() -> None:
     calls = []
 
     async def decide(**kwargs):
@@ -111,23 +129,132 @@ def test_notification_event_resolves_without_remote_session_lookup() -> None:
             "reason": "matched",
         }
 
-    resolution = asyncio.run(resolve_notification_event(_event(), decide))
+    resolution = asyncio.run(resolve_notification_event(_event(), [], decide))
 
-    assert resolution.correlation_status == "notification_only"
-    assert resolution.decision.action == "reply"
-    assert resolution.decision.text == "notification-only reply"
-    assert resolution.item_id == ""
-    assert calls == [
-        {
-            "send_user_name": _event().sender_label,
-            "send_user_id": resolution.sender_id,
-            "send_message": _event().body,
-            "item_id": "",
-            "chat_id": resolution.chat_id,
-            "msg_time": "2026-07-28T08:28:38+00:00",
-            "reserve_default_reply": False,
+    assert resolution.correlation_status == "not_found"
+    assert resolution.decision.action == "noop"
+    assert resolution.decision.reason == "identity_not_correlated"
+    assert resolution.chat_id is None
+    assert calls == []
+
+
+def test_notification_event_uses_real_identity_and_item_from_unique_session() -> None:
+    calls = []
+    session = {
+        "chat_id": "chat-001",
+        "sender_id": "buyer-001",
+        "sender_name": _event().sender_label,
+        "content": _event().body,
+        "item_id": "item-001",
+        "direction": 2,
+        "created_at": "2026-07-28 16:28:38",
+    }
+
+    async def decide(**kwargs):
+        calls.append(kwargs)
+        return {
+            "action": "reply",
+            "text": "matched reply",
+            "source": "keyword",
+            "reason": "matched",
         }
+
+    resolution = asyncio.run(
+        resolve_notification_event(_event(), [session], decide)
+    )
+
+    assert resolution.correlation_status == "matched"
+    assert resolution.chat_id == "chat-001"
+    assert resolution.sender_id == "buyer-001"
+    assert resolution.item_id == "item-001"
+    assert resolution.decision.text == "matched reply"
+    assert calls[0]["chat_id"] == "chat-001"
+    assert calls[0]["send_user_id"] == "buyer-001"
+    assert calls[0]["item_id"] == "item-001"
+
+
+def test_notification_event_uses_signed_android_activity_identity() -> None:
+    calls = []
+    event = _event().model_copy(
+        update={
+            "chat_id": "chat-activity-001",
+            "sender_id": "buyer-activity-001",
+            "item_id": "item-activity-001",
+            "correlation_source": "android_activity_intent",
+        }
+    )
+
+    async def decide(**kwargs):
+        calls.append(kwargs)
+        return {
+            "action": "reply",
+            "text": "activity matched",
+            "source": "AI",
+            "reason": "matched",
+        }
+
+    resolution = asyncio.run(resolve_notification_event(event, [], decide))
+
+    assert resolution.correlation_status == "matched"
+    assert resolution.chat_id == "chat-activity-001"
+    assert resolution.sender_id == "buyer-activity-001"
+    assert resolution.item_id == "item-activity-001"
+    assert calls[0]["chat_id"] == "chat-activity-001"
+
+
+def test_notification_event_refuses_ambiguous_real_sessions() -> None:
+    sessions = [
+        {
+            "chat_id": chat_id,
+            "sender_id": buyer_id,
+            "sender_name": "",
+            "content": _event().body,
+            "item_id": item_id,
+            "direction": 2,
+            "created_at": "2026-07-28 16:28:38",
+        }
+        for chat_id, buyer_id, item_id in (
+            ("chat-001", "buyer-001", "item-001"),
+            ("chat-002", "buyer-002", "item-002"),
+        )
     ]
+
+    async def should_not_decide(**_kwargs):
+        raise AssertionError("ambiguous identity must not reach reply policy")
+
+    resolution = asyncio.run(
+        resolve_notification_event(_event(), sessions, should_not_decide)
+    )
+
+    assert resolution.correlation_status == "ambiguous"
+    assert resolution.decision.action == "noop"
+    assert resolution.decision.reason == "identity_ambiguous"
+
+
+def test_notification_event_refuses_conflicting_items_in_the_same_chat() -> None:
+    sessions = [
+        {
+            "chat_id": "chat-001",
+            "sender_id": "buyer-001",
+            "sender_name": _event().sender_label,
+            "content": _event().body,
+            "item_id": item_id,
+            "direction": 2,
+            "created_at": "2026-07-28 16:28:38",
+        }
+        for item_id in ("item-001", "item-002")
+    ]
+
+    async def should_not_decide(**_kwargs):
+        raise AssertionError("conflicting item identity must not reach reply policy")
+
+    resolution = asyncio.run(
+        resolve_notification_event(_event(), sessions, should_not_decide)
+    )
+
+    assert resolution.correlation_status == "ambiguous"
+    assert resolution.decision.action == "noop"
+    assert resolution.decision.reason == "identity_ambiguous"
 
 
 def test_server_gateway_resolver_does_not_query_legacy_message_stream() -> None:
@@ -152,7 +279,23 @@ def test_server_gateway_resolver_does_not_query_legacy_message_stream() -> None:
     }
 
     assert "resolve_notification_event" in called_names
+    assert "get_chat_sessions" in accessed_attributes
     assert "list_newest_conversations" not in accessed_attributes
+
+
+def test_server_gateway_resolver_returns_before_chat_persistence_when_unmatched() -> None:
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    source_path = os.path.join(project_root, "reply_server.py")
+    with open(source_path, "r", encoding="utf-8") as source_file:
+        source = source_file.read()
+
+    resolver_start = source.index("async def _resolve_android_gateway_event(")
+    resolver_end = source.index("\n\nasync def _apply_android_gateway_receipt(", resolver_start)
+    resolver_source = source[resolver_start:resolver_end]
+
+    guard = 'if resolution.correlation_status != "matched":\n        return resolution'
+    assert guard in resolver_source
+    assert resolver_source.index(guard) < resolver_source.index("db_manager.save_chat_message(")
 
 
 def test_gateway_service_caches_decision_for_duplicate_event(tmp_path) -> None:
