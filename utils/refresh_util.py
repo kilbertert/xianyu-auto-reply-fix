@@ -1216,7 +1216,7 @@ class DrissionHandler:
                             try:
                                 # 使用正确的方式获取监听到的请求
                                 packet_count = 0
-                                for packet in self.page.listen.steps(count=10):  # 最多检查10个数据包
+                                for packet in self.page.listen.steps(count=10, timeout=3):  # 最多检查10个数据包，3秒无新包即结束
                                     packet_count += 1
                                     if 'slide' in packet.url:
                                         # 获取响应头

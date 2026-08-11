@@ -204,6 +204,7 @@ utils/*.dist/
 *.onefile-build/
 
 # 浏览器数据和缓存
+browser_data/
 DrissionPage/
 .drission/
 selenium/

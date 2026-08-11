@@ -14566,7 +14566,7 @@ function resetPasswordLoginForm() {
 let qrCodeCheckInterval = null;
 let qrCodeSessionId = null;
 let qrCodeModalEventsBound = false;
-let qrLoginMode = 'standard'; // 'standard' = 原 Playwright；'lite' = 纯 HTTP (cv-cat 风格)
+let qrLoginMode = 'standard'; // 默认使用可处理风控验证并完成 Cookie 获取的浏览器流程
 let qrCodeVerificationState = {
     renderKey: '',
     toastShown: false,
@@ -14586,6 +14586,21 @@ function getQRLoginEndpoints() {
         generate: `${apiBase}/qr-login/generate`,
         checkPrefix: `${apiBase}/qr-login/check/`,
     };
+}
+
+function handleQRCodeAuthFailure(response) {
+    if (response.status !== 401 && response.status !== 403) {
+        return false;
+    }
+
+    clearQRCodeCheck();
+    localStorage.removeItem('auth_token');
+    authToken = '';
+    showQRCodeError('登录状态已失效，请重新登录');
+    setTimeout(() => {
+        window.location.href = '/login.html';
+    }, 1500);
+    return true;
 }
 
 function applyQRLoginModeChrome() {
@@ -14679,6 +14694,10 @@ async function generateQRCode() {
         }
     });
 
+    if (handleQRCodeAuthFailure(response)) {
+        return;
+    }
+
     if (response.ok) {
         const data = await response.json();
         if (data.success) {
@@ -14761,6 +14780,11 @@ async function checkQRCodeStatus() {
         'Authorization': `Bearer ${authToken}`
         }
     });
+
+    if (handleQRCodeAuthFailure(response)) {
+        qrCodeVerificationState.completed = true;
+        return;
+    }
 
     if (requestSessionId !== qrCodeVerificationState.activeSessionId || qrCodeVerificationState.completed) {
         return;

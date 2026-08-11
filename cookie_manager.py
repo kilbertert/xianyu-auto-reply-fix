@@ -1,10 +1,20 @@
 from __future__ import annotations
 import asyncio
+import os
 from typing import Dict, List, Tuple, Optional
 from loguru import logger
 from db_manager import db_manager
 
-__all__ = ["CookieManager", "manager"]
+__all__ = ["CookieManager", "android_gateway_owns_transport", "manager"]
+
+
+def android_gateway_owns_transport(cookie_id: str) -> bool:
+    managed = {
+        value.strip()
+        for value in os.getenv("ANDROID_GATEWAY_ACCOUNT_IDS", "").split(",")
+        if value.strip()
+    }
+    return str(cookie_id or "").strip() in managed
 
 
 class CookieManager:
@@ -60,6 +70,9 @@ class CookieManager:
     # ------------------------ 内部协程 ------------------------
     async def _run_xianyu(self, cookie_id: str, cookie_value: str, user_id: int = None):
         """在事件循环中启动 XianyuLive.main"""
+        if android_gateway_owns_transport(cookie_id):
+            logger.info(f"【{cookie_id}】Android 网关已接管消息传输，跳过 WebSocket 任务")
+            return
         logger.info(f"【{cookie_id}】_run_xianyu方法开始执行...")
 
         try:
@@ -153,9 +166,12 @@ class CookieManager:
                 if cookie_info:
                     actual_user_id = cookie_info.get('user_id')
 
-            task = self.loop.create_task(self._run_xianyu(cookie_id, cookie_value, actual_user_id))
-            self.tasks[cookie_id] = task
-            logger.info(f"已启动账号任务: {cookie_id} (用户ID: {actual_user_id})")
+            if android_gateway_owns_transport(cookie_id):
+                logger.info(f"【{cookie_id}】Cookie 已保存，Android 网关账号不启动 WebSocket 任务")
+            else:
+                task = self.loop.create_task(self._run_xianyu(cookie_id, cookie_value, actual_user_id))
+                self.tasks[cookie_id] = task
+                logger.info(f"已启动账号任务: {cookie_id} (用户ID: {actual_user_id})")
 
     async def _remove_cookie_async(self, cookie_id: str):
         # 获取或创建该cookie_id的锁
@@ -275,11 +291,15 @@ class CookieManager:
                 self.keywords[cookie_id] = original_keywords
                 self.cookie_status[cookie_id] = original_status
 
-                # 重新启动任务
-                task = self.loop.create_task(self._run_xianyu(cookie_id, new_value, original_user_id))
-                self.tasks[cookie_id] = task
-
-                logger.info(f"已更新Cookie并重启任务: {cookie_id} (用户ID: {original_user_id}, 关键词: {len(original_keywords)}条)")
+                if android_gateway_owns_transport(cookie_id):
+                    logger.info(
+                        f"已更新 Android 网关账号 Cookie，不启动 WebSocket 任务: {cookie_id} "
+                        f"(用户ID: {original_user_id}, 关键词: {len(original_keywords)}条)"
+                    )
+                else:
+                    task = self.loop.create_task(self._run_xianyu(cookie_id, new_value, original_user_id))
+                    self.tasks[cookie_id] = task
+                    logger.info(f"已更新Cookie并重启任务: {cookie_id} (用户ID: {original_user_id}, 关键词: {len(original_keywords)}条)")
 
         try:
             current_loop = asyncio.get_running_loop()
@@ -341,6 +361,9 @@ class CookieManager:
 
     def _start_cookie_task(self, cookie_id: str):
         """启动指定Cookie的任务"""
+        if android_gateway_owns_transport(cookie_id):
+            logger.info(f"【{cookie_id}】Android 网关已接管消息传输，跳过 WebSocket 任务启动")
+            return
         if cookie_id in self.tasks:
             existing_task = self.tasks.get(cookie_id)
             if existing_task is not None and not existing_task.done():
@@ -440,4 +463,4 @@ class CookieManager:
 
 
 # 在 Start.py 中会把此变量赋值为具体实例
-manager: Optional[CookieManager] = None 
+manager: Optional[CookieManager] = None
